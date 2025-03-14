@@ -1,271 +1,198 @@
-# main.py
 import tkinter as tk
 from tkinter import ttk
+import numpy as np
+import matplotlib.pyplot as plt
+from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+from scipy.fft import fft, fftfreq
+from scipy.interpolate import interp1d
+import tensorflow as tf
+from tensorflow.keras import layers, Model
 import threading
 import queue
 import time
-from tkinter import messagebox
-import zlib
-import numpy as np
-import h5py
-from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
-from matplotlib.figure import Figure
 
-# Импорт модулей из предыдущих скриптов
-from signal_generator import SignalGenerator
-from data_parser import DataParser
-from wifi_detector_model import WiFiDetectorModel
+class SpectrumAnalyzer:
+    def __init__(self):
+        self.fs = 5e9
+        self.duration = 1e-6
+        self.n_samples = 4096
+        self.freq_range = (2.4e9, 2.5e9)
+        self.fixed_size = 500  # Фиксированный размер спектрограммы
+
+    def generate_spectrum(self, add_wifi=False):
+        t = np.linspace(0, self.duration, self.n_samples)
+        signal = np.random.normal(0, 0.2, self.n_samples)
+        
+        if add_wifi:
+            channel = np.random.choice([1, 6, 11])
+            wifi_freq = 2.412e9 + (channel-1)*0.005e9
+            signal += 0.8 * np.sin(2 * np.pi * wifi_freq * t)
+        
+        yf = fft(signal)
+        xf = fftfreq(self.n_samples, 1/self.fs)
+        
+        mask = (xf >= self.freq_range[0]) & (xf <= self.freq_range[1])
+        xf_filtered = xf[mask]
+        yf_filtered = np.abs(yf[mask])**2
+        
+        
+        
+        # Защита от пустых данных
+        if len(xf_filtered) < 2:
+            xf_fixed = np.linspace(self.freq_range[0], self.freq_range[1], self.fixed_size)
+            yf_fixed = np.full(self.fixed_size, 1e-12)  # Заполняем минимальным значением
+        else:
+            # Интерполяция и защита от отрицательных значений
+            interp_func = interp1d(xf_filtered, yf_filtered, kind='linear', fill_value="extrapolate")
+            xf_fixed = np.linspace(self.freq_range[0], self.freq_range[1], self.fixed_size)
+            yf_fixed = interp_func(xf_fixed)
+            yf_fixed = np.clip(yf_fixed, a_min=1e-12, a_max=None)  # Обрезаем отрицательные значения
+        
+        return xf_fixed, 10 * np.log10(yf_fixed + 1e-12)
+
+class Autoencoder(Model):
+    def __init__(self):
+        super().__init__()
+        self.encoder = tf.keras.Sequential([
+            layers.Reshape([500, 1]),
+            layers.Conv1D(32, 5, activation='relu', padding='same'),
+            layers.MaxPooling1D(2),
+            layers.Conv1D(16, 5, activation='relu', padding='same')
+        ])
+        
+        self.decoder = tf.keras.Sequential([
+            layers.Conv1DTranspose(16, 5, activation='relu', padding='same'),
+            layers.UpSampling1D(2),
+            layers.Conv1DTranspose(32, 5, activation='relu', padding='same'),
+            layers.Conv1D(1, 3, activation='sigmoid', padding='same'),
+            layers.Reshape([500])
+        ])
+        
+    def call(self, x):
+        encoded = self.encoder(x)
+        decoded = self.decoder(encoded)
+        return decoded
 
 class Application(tk.Tk):
     def __init__(self):
         super().__init__()
-        self.title("Wi-Fi Signal Analyzer 2.4GHz")
-        self.geometry("1400x900")
+        self.title("WiFi Spectrum Detector")
+        self.analyzer = SpectrumAnalyzer()
+        self.model = Autoencoder()
+        self.data_queue = queue.Queue(maxsize=10)
+        self.running = False
+        self.training = False
+        self.threshold = 0.15
         
-        # Инициализация компонентов
-        self.init_queues()
-        self.init_components()
-        self.init_gui()
-        self.bind_events()
-        
-    def init_queues(self):
-        """Инициализация очередей для межпоточного взаимодействия"""
-        self.generator_queue = queue.Queue(maxsize=100)
-        self.detection_queue = queue.Queue(maxsize=50)
-        self.log_queue = queue.Queue()
-        
-    def init_components(self):
-        """Инициализация основных компонентов системы"""
-        # Генератор сигналов
-        self.generator = SignalGenerator(log_queue=self.log_queue)
-        
-        # Парсер данных
-        self.parser = DataParser(
-            input_queue=self.generator_queue,
-            output_queue=self.detection_queue,
-            window_size=1024,
-            log_queue=self.log_queue,
-            dataset_mode=(self.mode_var.get() == "dataset")
-        )
-        
-        # Нейросетевая модель
-        self.model = WiFiDetectorModel(log_queue=self.log_queue)
-        self.training_params = {
-            'epochs': 100,
-            'batch_size': 64,
-            'dataset_path': 'dataset.h5'
-        }
-        
-    def update_params(self, param, value):
-        self.generator.update_params({param: value})
-        
-    def init_gui(self):
-        """Инициализация графического интерфейса"""
-        self.init_control_panel()
-        self.init_visualization()
-        self.init_status_bar()
-        self.init_log_panel()
-        
-    def init_control_panel(self):
-        """Панель управления"""
-        control_frame = ttk.Frame(self)
-        control_frame.pack(side=tk.TOP, fill=tk.X, padx=5, pady=5)
-        
-        # Кнопки управления
-        self.start_btn = ttk.Button(control_frame, text="Start", command=self.start)
-        self.stop_btn = ttk.Button(control_frame, text="Stop", command=self.stop, state=tk.DISABLED)
-        
-        # Выбор режима
-        self.mode_var = tk.StringVar(value="realtime")
-        mode_frame = ttk.LabelFrame(control_frame, text="Operation Mode")
-        ttk.Radiobutton(mode_frame, text="Real-Time", variable=self.mode_var, 
-                       value="realtime").pack(side=tk.LEFT)
-        ttk.Radiobutton(mode_frame, text="Training", variable=self.mode_var,
-                       value="training").pack(side=tk.LEFT)
-        
-        # Параметры обучения
-        self.epochs_var = tk.IntVar(value=100)
-        ttk.Label(mode_frame, text="Epochs:").pack(side=tk.LEFT)
-        ttk.Entry(mode_frame, textvariable=self.epochs_var, width=5).pack(side=tk.LEFT)
-        
-        # Расположение элементов
-        mode_frame.pack(side=tk.LEFT, padx=10)
-        self.start_btn.pack(side=tk.LEFT, padx=5)
-        self.stop_btn.pack(side=tk.LEFT, padx=5)
-        
-    def init_visualization(self):
-        """Область визуализации"""
-        vis_frame = ttk.Frame(self)
-        vis_frame.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
-        
-        # Основной график
-        self.main_figure = Figure(figsize=(10, 4))
-        self.main_ax = self.main_figure.add_subplot(111)
-        self.main_canvas = FigureCanvasTkAgg(self.main_figure, master=vis_frame)
-        self.main_canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
-        
-        # Дополнительный график для обучения
-        self.train_figure = Figure(figsize=(10, 3))
-        self.train_ax = self.train_figure.add_subplot(111)
-        self.train_canvas = FigureCanvasTkAgg(self.train_figure, master=vis_frame)
-        
-    def init_status_bar(self):
-        """Строка состояния"""
-        self.status_var = tk.StringVar()
-        status_bar = ttk.Label(self, textvariable=self.status_var)
-        status_bar.pack(side=tk.BOTTOM, fill=tk.X)
-        
-    def init_log_panel(self):
-        """Панель логов"""
-        log_frame = ttk.Frame(self)
-        log_frame.pack(side=tk.RIGHT, fill=tk.Y, padx=5, pady=5)
-        
-        self.log_text = tk.Text(log_frame, width=40, height=20)
-        scrollbar = ttk.Scrollbar(log_frame, command=self.log_text.yview)
-        self.log_text.configure(yscrollcommand=scrollbar.set)
-        
-        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
-        self.log_text.pack(fill=tk.BOTH, expand=True)
-        
-    def bind_events(self):
-        """Привязка обработчиков событий"""
+        self.init_ui()
         self.protocol("WM_DELETE_WINDOW", self.on_close)
+        self.model.compile(optimizer='adam', loss='mse')
         
-    def start(self):
-        """Запуск системы"""
-        mode = self.mode_var.get()
-        self.start_btn.config(state=tk.DISABLED)
-        self.stop_btn.config(state=tk.NORMAL)
+    def init_ui(self):
+        control_frame = ttk.Frame(self)
+        control_frame.pack(pady=10)
         
-        # Запуск потоков
-        self.generator_thread = threading.Thread(
-            target=self.generator.run,
-            kwargs={'output_queue': self.generator_queue},
-            daemon=True
+        self.train_btn = ttk.Button(
+            control_frame, 
+            text="Обучить модель", 
+            command=self.start_training
         )
+        self.train_btn.pack(side=tk.LEFT, padx=5)
         
-        self.parser_thread = threading.Thread(
-            target=self.parser.run,
-            daemon=True
+        self.start_btn = ttk.Button(
+            control_frame, 
+            text="Пуск детектора", 
+            command=self.toggle_scan
         )
+        self.start_btn.pack(side=tk.LEFT, padx=5)
         
-        self.nn_thread = threading.Thread(
-            target=self.run_neural_network,
-            daemon=True
-        )
+        self.fig, self.ax = plt.subplots(figsize=(10, 5))
+        self.canvas = FigureCanvasTkAgg(self.fig, master=self)
+        self.canvas.get_tk_widget().pack()
         
-        self.generator_thread.start()
-        self.parser_thread.start()
-        self.nn_thread.start()
+        self.ax.set_xlim(2.4e9, 2.5e9)
+        self.ax.set_ylim(-100, 20)
+        self.ax.set_xlabel('Frequency [GHz]')
+        self.ax.set_ylabel('Power [dBm]')
+        self.ax.grid(True)
+        self.ax.xaxis.set_major_formatter(lambda x, _: f'{x/1e9:.3f}')
+        self.line, = self.ax.plot([], [], lw=1, color='blue')
+        self.anomaly_patch = self.ax.axvspan(0, 0, facecolor='red', alpha=0.3)
         
-        # Запуск обновления GUI
-        self.update_gui()
+    def start_training(self):
+        if not self.training:
+            self.training = True
+            self.train_btn.config(text="Обучение...")
+            threading.Thread(target=self.train_model).start()
+            
+    def train_model(self):
+        X_train = np.array([self.analyzer.generate_spectrum()[1] for _ in range(1000)])
+        X_train = (X_train - X_train.min()) / (X_train.max() - X_train.min() + 1e-12)
+        self.model.fit(X_train, X_train, epochs=10, batch_size=32, verbose=1)
+        self.training = False
+        self.train_btn.config(text="Обучить модель")
         
-    def stop(self):
-        """Остановка системы"""
-        self.generator.stop()
-        self.parser.stop()
-        self.model.stop_training = True
-        
-        self.start_btn.config(state=tk.NORMAL)
-        self.stop_btn.config(state=tk.DISABLED)
-        
-    def run_neural_network(self):
-        """Запуск нейросетевого компонента"""
-        if self.mode_var.get() == "training":
-            self.training_params['epochs'] = self.epochs_var.get()
-            self.model.train(**self.training_params)
-            self.show_training_results()
+    def toggle_scan(self):
+        if not self.running:
+            self.start_scan()
         else:
-            self.model.realtime_analysis(self.detection_queue)
+            self.stop_scan()
             
-    def update_gui(self):
-        """Обновление графического интерфейса"""
-        # Обновление статусов
-        status_info = [
-            f"Generator: {self.generator.status}",
-            f"Parser: {self.parser.status}",
-            f"Model: {self.model.status}"
-        ]
-        self.status_var.set(" | ".join(status_info))
+    def start_scan(self):
+        self.running = True
+        self.start_btn.config(text="Стоп детектор")
+        threading.Thread(target=self.continuous_scan).start()
+        self.after(100, self.update_plot)
+            
+    def stop_scan(self):
+        self.running = False
+        self.start_btn.config(text="Пуск детектора")
         
-        # Обновление графиков
-        self.update_main_plot()
-        self.update_logs()
+    def continuous_scan(self):
+        while self.running:
+            try:
+                add_wifi = np.random.rand() > 0.5
+                xf, yf = self.analyzer.generate_spectrum(add_wifi)
+                self.data_queue.put((xf, yf, add_wifi))
+                time.sleep(0.1)
+            except:
+                break
+    
+    def detect_anomaly(self, signal):
+        signal_norm = (signal - signal.mean()) / signal.std()
+        reconstructed = self.model.predict(signal_norm[np.newaxis, :], verbose=0)
+        return np.mean(np.square(signal_norm - reconstructed)) > self.threshold
+    
+    def update_plot(self):
+        if not self.running:
+            return
+            
+        try:
+            xf, yf, true_label = self.data_queue.get_nowait()
+            
+            # Обновление графика
+            self.line.set_data(xf, yf)
+            
+            # Детекция аномалий
+            anomaly = self.detect_anomaly(yf)
+            self.anomaly_patch.set_visible(anomaly)
+            title = f"WiFi Detected: {anomaly} (True: {true_label})"
+            self.ax.set_title(title)
+            
+            # Автомасштабирование
+            y_min = np.min(yf) - 5 if len(yf) > 0 else -100
+            y_max = np.max(yf) + 5 if len(yf) > 0 else 20
+            self.ax.set_ylim(y_min, y_max)
+            
+            self.canvas.draw_idle()
+            
+        except queue.Empty:
+            pass
         
-        # Периодический вызов
-        self.after(100, self.update_gui)
-        
-    def update_main_plot(self):
-        """Обновление основного графика"""
-        if self.mode_var.get() == "realtime":
-            self.update_realtime_plot()
-        else:
-            self.update_training_plot()
-            
-    def plot_signal(self):
-        compressed = self.generator_queue.get()
-        signal = np.frombuffer(zlib.decompress(compressed), dtype=np.complex64)
-        ax = self.figure.add_subplot(111)
-        ax.clear()
-        ax.plot(np.real(signal[:500]), label='Real')
-        ax.plot(np.imag(signal[:500]), label='Imag')
-        ax.legend()
-        self.canvas.draw()
-            
-    def update_realtime_plot(self):
-        """Обновление графика в реальном времени"""
-        if not self.detection_queue.empty():
-            signal, pred = self.detection_queue.get()
-            self.main_ax.clear()
-            
-            # Отображение сигнала
-            self.main_ax.plot(signal.real, label='Real Part', alpha=0.7)
-            self.main_ax.plot(signal.imag, label='Imag Part', alpha=0.7)
-            
-            # Отображение предсказания
-            if pred[1] > 0.8:  # Порог обнаружения
-                self.main_ax.axvspan(
-                    np.argmax(signal.real)-50, 
-                    np.argmax(signal.real)+50, 
-                    color='red', alpha=0.3
-                )
-                
-            self.main_ax.legend()
-            self.main_canvas.draw()
-            
-    def update_training_plot(self):
-        """Обновление графиков обучения"""
-        if self.model.history:
-            self.train_ax.clear()
-            
-            # График потерь
-            self.train_ax.plot(self.model.history.history['loss'], label='Train Loss')
-            self.train_ax.plot(self.model.history.history['val_loss'], label='Val Loss')
-            self.train_ax.set_title('Training Progress')
-            self.train_ax.legend()
-            
-            self.train_canvas.draw()
-            
-    def update_logs(self):
-        """Обновление логов"""
-        while not self.log_queue.empty():
-            log_entry = self.log_queue.get()
-            self.log_text.insert(tk.END, log_entry + "\n")
-            self.log_text.see(tk.END)
-            
-    def show_training_results(self):
-        """Показать результаты обучения"""
-        best_loss = min(self.model.history.history['val_loss'])
-        messagebox.showinfo(
-            "Training Complete",
-            f"Best validation loss: {best_loss:.4f}\n"
-            f"Final model saved to: wifi_model.h5"
-        )
-        
+        self.after(100, self.update_plot)
+    
     def on_close(self):
-        """Обработчик закрытия окна"""
-        self.stop()
+        self.stop_scan()
         self.destroy()
 
 if __name__ == "__main__":
