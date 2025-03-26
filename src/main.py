@@ -184,3 +184,50 @@ def predict(model, spectrum):
         recon, logits = model(x)
         pred = torch.argmax(logits).item()
         return pred, recon.squeeze().cpu().numpy()
+    
+print("Создаём обучающий набор...")
+train_data, train_labels = create_dataset(n_samples=1000)
+model = WifiDetector()
+
+model_path = 'wifi_detector_model.pth'
+if load_model(model, model_path):
+    pass
+else:
+    print("Начинаем обучение модели...")
+    model, metrics = train_model(model, train_data, train_labels, epochs=50)
+    save_model(model, model_path)
+
+    plt.figure(figsize=(15,5))
+    plt.subplot(1,2,1)
+    plt.plot(metrics['total_loss'], label='Total Loss')
+    plt.plot(metrics['recon_loss'], label='Reconstruction Loss')
+    plt.plot(metrics['class_loss'], label='Classification Loss')
+    plt.xlabel('Epoch')
+    plt.ylabel('Loss')
+    plt.legend()
+    
+    plt.subplot(1,2,2)
+    plt.plot(metrics['accuracy'], color='purple', label='Accuracy')
+    plt.xlabel('Epoch')
+    plt.ylabel('Accuracy')
+    plt.legend()
+    plt.tight_layout()
+    plt.show()
+
+def update_plot():
+    spec, true_label = generate_random_sample()
+    pred_label, recon = predict(model, spec)
+    
+    ax.clear()
+    extent = [0, IMG_WIDTH, 2.4, 2.5]
+    im = ax.imshow(spec, cmap='viridis', aspect='auto', extent=extent, origin='lower')
+    ax.set_title(f"True: {true_label} | Predicted: {pred_label}")
+    ax.set_xlabel("Time (a.u.)")
+    ax.set_ylabel("Frequency (GHz)")
+    
+    if pred_label != 0 and pred_label in CHANNEL_CENTER_BIN:
+        center_bin = CHANNEL_CENTER_BIN[pred_label]
+        center_freq = bin_to_freq(center_bin)
+        ax.axhline(y=center_freq, color='red', linewidth=2, linestyle='--', label='WiFi Detected')
+        ax.legend()
+    canvas.draw()
