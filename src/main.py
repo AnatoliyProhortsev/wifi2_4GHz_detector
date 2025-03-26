@@ -231,3 +231,16 @@ def update_plot():
         ax.axhline(y=center_freq, color='red', linewidth=2, linestyle='--', label='WiFi Detected')
         ax.legend()
     canvas.draw()
+
+    root = tk.Tk()
+    root.title("WiFi Detector GUI")
+
+    fig, ax = plt.subplots(figsize=(5, 5))
+    canvas = FigureCanvasTkAgg(fig, master=root)
+    canvas.get_tk_widget().pack(side=tk.TOP, fill=tk.BOTH, expand=1)
+
+    btn = tk.Button(root, text="Сгенерировать спектр", command=update_plot)
+    btn.pack(side=tk.BOTTOM)
+
+    update_plot()
+    root.mainloop()
