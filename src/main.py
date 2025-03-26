@@ -23,24 +23,23 @@ def generate_spectrum(with_wifi=False, wifi_channel=None):
         center = CHANNEL_CENTER_BIN[wifi_channel]
         sigma = 5.0
         freqs = np.arange(IMG_HEIGHT)
-        gauss = np.exp(-((freqs - center) ** 2) / (2 * sigma ** 2))
-
+        gauss = np.exp(-((freqs - center)**2)/(2*sigma**2))
+        
         time_mask = np.zeros(IMG_WIDTH)
         num_bands = random.randint(1, 3)
         for _ in range(num_bands):
-            start = random.randint(0, IMG_WIDTH - 10)
+            start = random.randint(0, IMG_WIDTH-10)
             width = random.randint(5, 20)
-            time_mask[start:start + width] = 1.0
-
+            time_mask[start:start+width] = 1.0
+        
         signal = np.outer(gauss, time_mask) * 1.0
         spectrum += signal
-
+        
         noise = np.random.normal(loc=0.0, scale=0.1, size=(IMG_HEIGHT, IMG_WIDTH))
         spectrum += signal * noise
-
+        
     spectrum = np.clip(spectrum, 0, 1)
     return spectrum.astype(np.float32)
-
 
 def generate_random_sample(prob_wifi=0.5):
     if random.random() < prob_wifi:
@@ -51,7 +50,6 @@ def generate_random_sample(prob_wifi=0.5):
         spectrum = generate_spectrum(with_wifi=False)
         label = 0
     return spectrum, label
-
 
 def create_dataset(n_samples=1000):
     data = np.zeros((n_samples, 1, IMG_HEIGHT, IMG_WIDTH), dtype=np.float32)
@@ -184,7 +182,7 @@ def predict(model, spectrum):
         recon, logits = model(x)
         pred = torch.argmax(logits).item()
         return pred, recon.squeeze().cpu().numpy()
-    
+
 print("Создаём обучающий набор...")
 train_data, train_labels = create_dataset(n_samples=1000)
 model = WifiDetector()
@@ -232,15 +230,15 @@ def update_plot():
         ax.legend()
     canvas.draw()
 
-    root = tk.Tk()
-    root.title("WiFi Detector GUI")
+root = tk.Tk()
+root.title("WiFi Detector GUI")
 
-    fig, ax = plt.subplots(figsize=(5, 5))
-    canvas = FigureCanvasTkAgg(fig, master=root)
-    canvas.get_tk_widget().pack(side=tk.TOP, fill=tk.BOTH, expand=1)
+fig, ax = plt.subplots(figsize=(5, 5))
+canvas = FigureCanvasTkAgg(fig, master=root)
+canvas.get_tk_widget().pack(side=tk.TOP, fill=tk.BOTH, expand=1)
 
-    btn = tk.Button(root, text="Сгенерировать спектр", command=update_plot)
-    btn.pack(side=tk.BOTTOM)
+btn = tk.Button(root, text="Сгенерировать спектр", command=update_plot)
+btn.pack(side=tk.BOTTOM)
 
-    update_plot()
-    root.mainloop()
+update_plot()
+root.mainloop()
