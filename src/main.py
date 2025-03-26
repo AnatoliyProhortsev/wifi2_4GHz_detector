@@ -14,10 +14,8 @@ IMG_HEIGHT = 128
 IMG_WIDTH = 128
 CHANNEL_CENTER_BIN = {1: 12, 2: 26, 3: 40, 4: 54}
 
-
 def bin_to_freq(bin_index):
     return 2.4 + (bin_index / (IMG_HEIGHT - 1)) * 0.1
-
 
 def generate_spectrum(with_wifi=False, wifi_channel=None):
     spectrum = np.random.normal(loc=0.2, scale=0.05, size=(IMG_HEIGHT, IMG_WIDTH))
@@ -64,7 +62,6 @@ def create_dataset(n_samples=1000):
         labels[i] = label
     return data, labels
 
-
 class WifiDetector(nn.Module):
     def __init__(self):
         super(WifiDetector, self).__init__()
@@ -99,4 +96,69 @@ class WifiDetector(nn.Module):
         logits = self.classifier(features)
         return reconstruction, logits
 
+def train_model(model, data, labels, epochs=50, batch_size=32, lr=1e-3):
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    model.to(device)
+    optimizer = optim.Adam(model.parameters(), lr=lr)
+    mse_loss = nn.MSELoss()
+    ce_loss = nn.CrossEntropyLoss()
+    
+    X = torch.from_numpy(data)
+    y = torch.from_numpy(labels)
+    
+    n_samples = X.shape[0]
+    metrics = {
+        'total_loss': [],
+        'recon_loss': [],
+        'class_loss': [],
+        'accuracy': [],
+        'all_preds': [],
+        'all_labels': []
+    }
+    
+    model.train()
+    for epoch in range(epochs):
+        permutation = torch.randperm(n_samples)
+        epoch_loss = epoch_recon = epoch_class = total_correct = 0
+        preds = []
+        true_labels = []
+        
+        for i in range(0, n_samples, batch_size):
+            indices = permutation[i:i+batch_size]
+            batch_x, batch_y = X[indices].to(device), y[indices].to(device)
+            
+            optimizer.zero_grad()
+            recon, logits = model(batch_x)
+            
+            loss_recon = mse_loss(recon, batch_x)
+            loss_class = ce_loss(logits, batch_y)
+            loss = loss_recon + 10 * loss_class
+            
+            loss.backward()
+            optimizer.step()
+            
+            epoch_loss += loss.item() * batch_x.size(0)
+            epoch_recon += loss_recon.item() * batch_x.size(0)
+            epoch_class += loss_class.item() * batch_x.size(0)
+            
+            batch_preds = torch.argmax(logits, dim=1)
+            total_correct += (batch_preds == batch_y).sum().item()
+            preds.extend(batch_preds.cpu().numpy())
+            true_labels.extend(batch_y.cpu().numpy())
+        
+        metrics['total_loss'].append(epoch_loss / n_samples)
+        metrics['recon_loss'].append(epoch_recon / n_samples)
+        metrics['class_loss'].append(epoch_class / n_samples)
+        metrics['accuracy'].append(total_correct / n_samples)
+        metrics['all_preds'].extend(preds)
+        metrics['all_labels'].extend(true_labels)
+        
+        print(f"Epoch {epoch+1}/{epochs}:")
+        print(f"  Loss: {metrics['total_loss'][-1]:.4f} (Recon: {metrics['recon_loss'][-1]:.4f}, Class: {metrics['class_loss'][-1]:.4f})")
+        print(f"  Accuracy: {metrics['accuracy'][-1]:.4f}")
+    
+    print("\nClassification Report:")
+    print(classification_report(metrics['all_labels'], metrics['all_preds'], target_names=['No WiFi']+[f'Ch {i}' for i in range(1,5)]))
+    
+    return model, metrics
 
