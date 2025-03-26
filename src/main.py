@@ -162,3 +162,25 @@ def train_model(model, data, labels, epochs=50, batch_size=32, lr=1e-3):
     
     return model, metrics
 
+def save_model(model, path='wifi_detector_model.pth'):
+    torch.save(model.state_dict(), path)
+    print(f"Model saved to {path}")
+
+def load_model(model, path='wifi_detector_model.pth'):
+    if os.path.exists(path):
+        model.load_state_dict(torch.load(path))
+        model.eval()
+        print(f"Model loaded from {path}")
+        return True
+    print(f"No model found at {path}")
+    return False
+
+def predict(model, spectrum):
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    model.to(device)
+    model.eval()
+    with torch.no_grad():
+        x = torch.from_numpy(spectrum).unsqueeze(0).unsqueeze(0).to(device)
+        recon, logits = model(x)
+        pred = torch.argmax(logits).item()
+        return pred, recon.squeeze().cpu().numpy()
